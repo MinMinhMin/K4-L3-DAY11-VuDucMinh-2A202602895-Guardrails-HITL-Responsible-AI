@@ -5,10 +5,17 @@ Wire rate limiter + lab guardrails + audit + monitoring + egress.
 You may use Google ADK plugins, LangGraph, NeMo, or pure Python.
 """
 from __future__ import annotations
+import re
+from urllib.parse import urlsplit
 
 from assignment.rate_limiter import RateLimitPlugin
 from assignment.audit_log import AuditLogPlugin
 from assignment.monitoring import MonitoringAlert
+from core.config import DEMO_SECRETS
+from guardrails.input_guardrails import InputGuardrailPlugin
+from guardrails.output_guardrails import OutputGuardrailPlugin, content_filter
+APPROVED_EGRESS_HOSTS = {"api.vinbank.example"}
+
 
 
 def is_egress_allowed(destination: str, payload: str) -> bool:
@@ -19,7 +26,28 @@ def is_egress_allowed(destination: str, payload: str) -> bool:
     contain a password, API key, database host, phone number or email address.
     Do not let the LLM's prose decide this policy.
     """
-    raise NotImplementedError("Implement is_egress_allowed")
+    if not isinstance(destination, str) or not isinstance(payload, str):
+        return False
+    try:
+        parsed = urlsplit(destination)
+        hostname = parsed.hostname
+    except ValueError:
+        return False
+    if (
+        parsed.scheme.lower() != "https"
+        or hostname not in APPROVED_EGRESS_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or "@" in parsed.netloc
+    ):
+        return False
+    if any(secret and secret.lower() in payload.lower() for secret in DEMO_SECRETS):
+        return False
+    return content_filter(payload)["safe"] and not re.search(
+        r"\b(?:password|api\s*key|secret|credential|internal)\b",
+        payload,
+        re.IGNORECASE,
+    )
 
 
 def build_production_plugins(
@@ -38,12 +66,19 @@ def build_production_plugins(
     Audit/monitoring can be plugins or side observers — document your choice.
     The action gateway calls ``is_egress_allowed`` separately before any sink.
     """
-    raise NotImplementedError("Implement build_production_plugins")
+    return [
+        RateLimitPlugin(
+            max_requests=max_requests,
+            window_seconds=window_seconds,
+        ),
+        InputGuardrailPlugin(),
+        OutputGuardrailPlugin(use_llm_judge=use_llm_judge),
+    ]
 
 
 def build_observability():
     """Return (AuditLogPlugin(), MonitoringAlert())."""
-    raise NotImplementedError("Implement build_observability")
+    return AuditLogPlugin(), MonitoringAlert()
 
 
 async def run_assignment_suite(pipeline) -> dict:
@@ -60,4 +95,6 @@ async def run_assignment_suite(pipeline) -> dict:
       <repo>/outputs/audit_log.json   (via AuditLogPlugin.export_json)
       <repo>/outputs/metrics.json     (via MonitoringAlert.export_json)
     """
-    raise NotImplementedError("Implement run_assignment_suite")
+    from assignment.suite import execute_suite
+
+    return await execute_suite(pipeline)
